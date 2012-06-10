@@ -1,12 +1,17 @@
+import datetime, json
+
 from django.conf import settings
 from django.contrib.auth import REDIRECT_FIELD_NAME
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ImproperlyConfigured
 from django.core.urlresolvers import reverse
-from django.http import HttpResponseForbidden, HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseForbidden, HttpResponseRedirect, Http404
 from django.utils.decorators import method_decorator
 from django.utils.http import urlquote
 from django.views.generic import CreateView
+from django.views.generic.base import TemplateResponseMixin, View
+from django.views.generic.list import BaseListView
+from django.views.generic.edit import BaseDeleteView, FormMixin
 
 
 class CreateAndRedirectToEditView(CreateView):
@@ -38,6 +43,29 @@ class LoginRequiredMixin(object):
     @method_decorator(login_required)
     def dispatch(self, *args, **kwargs):
         return super(LoginRequiredMixin, self).dispatch(*args, **kwargs)
+
+
+class AnonymousRequiredMixin(object):
+    """
+    Generic mixin to reserve a view only for anonymous user
+
+    NOTE:
+        This should be the left-most mixin of a view.
+    """
+    redirect_url = settings.LOGIN_URL
+    
+    def get_redirect_url(self):
+        return self.redirect_url
+    
+    def get(self, *args, **kwargs):
+        if not self.request.user.is_anonymous():
+            return HttpResponseRedirect(self.get_redirect_url())
+        return super(AnonymousRequiredMixin, self).get(*args, **kwargs)
+    
+    def post(self, *args, **kwargs):
+        if not self.request.user.is_anonymous():
+            return HttpResponseRedirect(self.get_redirect_url())
+        return super(AnonymousRequiredMixin, self).post(*args, **kwargs)
 
 
 class PermissionRequiredMixin(object):
@@ -177,3 +205,203 @@ class SelectRelatedMixin(object):
         return queryset.select_related(
             ", ".join(self.select_related)
         )
+
+
+class SimpleListView(TemplateResponseMixin, BaseListView):
+    """
+    Like generic.ListView but use only ``get_template`` to find template and not an 
+    automatic process on ``get_template_names``
+    """
+    pass
+
+
+class DirectDeleteView(BaseDeleteView):
+    """
+    To directly delete an object without template rendering on GET or POST methods
+    
+    "get_success_url" or "success_url" should be correctly filled
+    """
+    def get(self, *args, **kwargs):
+        return self.delete(*args, **kwargs)
+
+
+class ListAppendView(SimpleListView, FormMixin):
+    """
+    A view to display an object list with a form to append a new object
+    
+    This view re-use some code from FormMixin and SimpleListView, sadly it seem not 
+    possible to simply mix them.
+    
+    Need "model" and "form_class" attributes for the form parts and the required one 
+    by BaseListView. "get_success_url" method should be filled too.
+    
+    "locked_form" is used to disable form (like if your list object is closed to new 
+    object)
+    """
+    model = None
+    form_class = None
+    template_name = None
+    paginate_by = None
+    locked_form = False
+    
+    def form_valid(self, form):
+        self.object = form.save()
+        return super(ListAppendView, self).form_valid(form)
+
+    def form_invalid(self, form):
+        return self.render_to_response(self.get_context_data(object_list=self.object_list, form=form))
+
+    def is_locked_form(self):
+        return self.locked_form
+
+    def get_form(self, form_class):
+        """
+        Returns an instance of the form to be used in this view.
+        """
+        if self.is_locked_form():
+            return None
+        return form_class(**self.get_form_kwargs())
+        
+    def get(self, request, *args, **kwargs):
+        self.object_list = self.get_queryset()
+        
+        form_class = self.get_form_class()
+        form = self.get_form(form_class)
+        
+        allow_empty = self.get_allow_empty()
+        if not allow_empty and len(self.object_list) == 0:
+            raise Http404(_(u"Empty list and '%(class_name)s.allow_empty' is False.")
+                          % {'class_name': self.__class__.__name__})
+        
+        context = self.get_context_data(object_list=self.object_list, form=form)
+        return self.render_to_response(context)
+
+    def post(self, request, *args, **kwargs):
+        self.object_list = self.get_queryset()
+        
+        form_class = self.get_form_class()
+        form = self.get_form(form_class)
+        
+        allow_empty = self.get_allow_empty()
+        if not allow_empty and len(self.object_list) == 0:
+            raise Http404(_(u"Empty list and '%(class_name)s.allow_empty' is False.")
+                          % {'class_name': self.__class__.__name__})
+        
+        if form and form.is_valid():
+            return self.form_valid(form)
+        elif form:
+            return self.form_invalid(form)
+        else:
+            context = self.get_context_data(object_list=self.object_list, form=form)
+            return self.render_to_response(context)
+
+    def put(self, *args, **kwargs):
+        return self.post(*args, **kwargs)
+
+
+class DownloadMixin(object):
+    """
+    Simple Mixin to send a downloadable content
+    
+    Inherits must have :
+    
+    * Filled the ``self.mimetype`` attribute with the content mimetype to send;
+    * Implementation of ``get_filename()`` that return the filename to use in response 
+      headers;
+    * Implementation of ``get_content()`` that return the content to send as downloadable.
+    
+    If the content is a not a string, it is assumed to be a fileobject to send as 
+    the content with its ``read()`` method.
+    
+    Optionnaly implement a ``close_content()`` to close specifics objects linked to 
+    content fileobject, if it does not exists a try will be made on a close() method 
+    on the content fileobject;
+    
+    A "get_filename_timestamp" method is implemented to return a timestamp to use in your 
+    filename if needed, his date format is defined in "timestamp_format" attribute (in a 
+    suitable way to use with strftime on a datetime object).
+    """
+    mimetype = None
+    timestamp_format = "%Y-%m-%d"
+    
+    def get_filename_timestamp(self):
+        return datetime.datetime.now().strftime(self.timestamp_format)
+    
+    def get_filename(self, context):
+        raise ImproperlyConfigured("DownloadMixin requires an implementation of 'get_filename()' to return the filename to use in headers")
+    
+    def get_content(self, context):
+        raise ImproperlyConfigured("DownloadMixin requires an implementation of 'get_content()' to return the downloadable content")
+    
+    def render_to_response(self, context, **response_kwargs):
+        if getattr(self, 'mimetype', None) is None:
+            raise ImproperlyConfigured("DownloadMixin requires a definition of 'mimetype' attribute")
+        # Needed headers
+        response = HttpResponse(mimetype=self.mimetype, **response_kwargs)
+        response['Content-Disposition'] = 'attachment; filename={0}'.format(self.get_filename(context))
+        # Read the content file object or string, append it to response and close it
+        content = self.get_content(context)
+        if isinstance(content, basestring):
+            response.write(content)
+        else:
+            response.write(content.read())
+        # Conditionnal closing content object
+        if hasattr(self, 'close_content'):
+            self.close_content(context, content)
+        elif hasattr(content, 'close'):
+            content.close()
+            
+        return response
+
+    def get_context_data(self, **kwargs):
+        return {
+            'params': kwargs
+        }
+
+    def get(self, request, *args, **kwargs):
+        context = self.get_context_data(**kwargs)
+        return self.render_to_response(context)
+
+
+class ExcelExportView(DownloadMixin, View):
+    """
+    Generic view to export Excel file
+    
+    Inherits must implement at least the ``get_content()`` method to return the content 
+    fileobject
+    """
+    mimetype = 'application/ms-excel'
+    filename_format = "file_{timestamp}.xls"
+    
+    def get_context_data(self, **kwargs):
+        context = super(ExcelExportView, self).get_context_data(**kwargs)
+        context.update({
+            'timestamp': self.get_filename_timestamp(),
+        })
+        return context
+    
+    def get_filename(self, context):
+        return self.filename_format.format(**context)
+
+
+class JSONResponseMixin(object):
+    """Simple Mixin to return a JSON response"""
+    mimetype = "application/json"
+    json_indent = None
+    json_encoder = None
+    
+    def encode_context(self, context):
+        json_kwargs = {}
+        if self.json_indent is not None:
+            json_kwargs['indent'] = self.json_indent
+        if self.json_encoder is not None:
+            json_kwargs['encoder'] = self.json_encoder
+        return json.dumps(context, **json_kwargs)
+    
+    def render_to_response(self, context, **response_kwargs):
+        """
+        Returns a response with a template rendered with the given context.
+        """
+        if 'mimetype' not in response_kwargs:
+            response_kwargs['mimetype'] = self.mimetype
+        return HttpResponse(self.encode_context(context), **response_kwargs)

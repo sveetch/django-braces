@@ -37,6 +37,25 @@ requires a user to be authenticated. If that's all that is needed on this view, 
         def get(self, request):
             return self.render_to_response({})
 
+AnonymousRequiredMixin
+======================
+
+Simple mixin to restrict views for anonymous users only, authenticated users will be 
+redirected on the content of ``settings.LOGIN_URL`` by default. Use the ``redirect_url`` 
+class attribute or ``get_redirect_url`` to change the redirect.
+
+::
+
+    from django.views.generic import TemplateView
+
+    from braces.views import LoginRequiredMixin
+
+
+    class PublicForNonAuthenticadUserView(AnonymousRequiredMixin, TemplateView):
+        template_name = "path/to/template.html"
+
+        def get(self, request):
+            return self.render_to_response({})
 
 PermissionRequiredMixin
 =======================
@@ -123,7 +142,6 @@ While this may be overkill for a weekend project, for us, it speeds up adding ne
 ::
 
     from braces.forms import UserKwargModelFormMixin
-
 
     class UserForm(UserKwargModelFormMixin, forms.ModelForm):
         class Meta:
@@ -244,6 +262,200 @@ A simple mixin which allows you to specify a list or tuple of foreign key fields
         model = Profile
         select_related = ["user"]
         template_name = "profiles/detail.html"
+
+
+SimpleListView
+==============
+
+This view is like the generic ``ListView`` but use only ``get_template`` to find template and 
+not an automatic process on ``get_template_names``.
+
+Use it like ``ListView`` but you only have to define the ``template_name`` class attribute.
+
+DirectDeleteView
+================
+
+This inherit from the generic ``BaseDeleteView`` to directly delete an object without 
+template rendering on GET or POST methods and redirect to an URL.
+
+Like ``BaseDeleteView`` this is using the ``get_object`` method to retrieve the objet to 
+delete.
+
+The  ``success_url`` class attribute or ``get_success_url`` method or must be correctly 
+filled.
+
+::
+
+    # views.py
+    from braces.views import DirectDeleteView
+    from myguestbook.models import Post
+    
+    class PostDeleteView(DirectDeleteView):
+        """
+        Directly delete a post and redirect to the guestbook index
+        """
+        model = Post
+        success_url = '/guestbook/'
+
+
+ListAppendView
+==============
+
+A view to display an object list with a form to append a new object to the list. 
+
+An example usage is a message list in a guestbook where you would want to display a form 
+after the list to append a new message.
+
+This view re-use some code from FormMixin and SimpleListView, because sadly it seems 
+not possible to simply mix them.
+
+Need ``model`` and ``form_class`` class attributes for the form parts and the required 
+ones by ``BaseListView``. The ``get_success_url`` method should be filled too.
+
+The additional ``locked_form`` method class is used to disable form (like if your list 
+object is closed to new object), also you can implement the ``is_locked_form`` method if 
+needed.
+
+::
+    
+    # views.py
+    
+    from braces import ListAppendView
+    
+    from myguestbook.models import Post
+    from myguestbook.forms import PostCreateForm
+    
+    class ThreadView(ListAppendView):
+        """
+        Message list with a form to append a new message, after validated form the user 
+        is redirected on the list
+        """
+        model = Post
+        form_class = PostCreateForm
+        template_name = 'guestbook/message_list.html'
+        paginate_by = 42
+        context_object_name = 'object_list'
+        success_url = '/guestbook/'
+        queryset = Post.objects.all()
+
+
+DownloadMixin
+==============
+
+Simple Mixin to send a downloadable content.
+
+Inherits must :
+
+* Fill the ``mimetype`` class attribute with the mimetype content to send;
+* Implement the ``get_filename`` method to return the filename to use in the 
+  response headers;
+* Implement the ``get_content`` method to return the content to send as 
+  downloadable.
+
+If the content is a not a string, it is assumed to be a file object to send as 
+the content with its ``read`` method and to close with its ``close`` method.
+
+Optionnaly implement a ``close_content`` to close specifics objects linked to 
+content file object, if it does not exists a try will be made on a ``close`` method 
+on the content file object.
+
+A ``get_filename_timestamp`` method is included to return a timestamp to use in your 
+filename if needed, his date format is defined in the ``timestamp_format`` class 
+attribute (in a suitable way to use with ``strftime`` on a datetime object).
+
+Finally the content is sended from the ``render_response`` method and as like 
+in a ``TemplateView`` the context kwargs are given to the method so you can prepare some 
+*stuff* in the ``get_context_data`` method.
+
+::
+    
+    # views.py
+    from django.views.generic.base import TemplateResponseMixin, View
+    
+    from braces import DownloadMixin
+    
+    class ReportPdfView(DownloadMixin, View):
+        """
+        Generic view to download a pdf file
+        """
+        mimetype = 'application/pdf'
+        filename_format = "report_{timestamp}.pdf"
+        
+        def get_context_data(self, **kwargs):
+            context = super(ReportPdfView, self).get_context_data(**kwargs)
+            context.update({
+                'timestamp': self.get_filename_timestamp(),
+            })
+            return context
+        
+        def get_filename(self, context):
+            return self.filename_format.format(**context)
+        
+        def get_content(self, context):
+            return open("myfile.pdf", "r")
+
+ExcelExportView
+===============
+
+A generic view to export an Excel file.
+
+Inherits must implement at least the ``get_content()`` method to return the content file 
+object. This is where you have to build your excel file object to send 
+(``ExcelExportView`` does not contain any specific methods to build an Excel file).
+
+::
+    
+    # views.py
+    from braces import ExcelExportView
+    
+    class ReportExcelView(ExcelExportView):
+        filename_format = "worksheet-{timestamp}.xls"
+        
+        def get_content(self, context, **response_kwargs):
+            # build your excel file here
+            content = ...
+            return content
+
+JSONResponseMixin
+=================
+
+This is a simple mixin to return a JSON response.
+
+It uses the context as the object to serialize in JSON, so your view should implement 
+the ``get_context_data`` method to return what you want to dump as JSON.
+
+Additionally you have some class attributes to change some behaviours :
+
+* ``mimetype`` if you want to return a different mimetype than the default 
+  one : ``application/json``;
+* ``json_indent`` (an integer) to indent your JSON if needed;
+* ``json_encoder`` to give a special encoder to use to dump your JSON if you have some 
+  objects (like a datetime) not supported by the ``json`` Python module.
+
+::
+    
+    # views.py
+    from django.views.generic.base import View
+    
+    from braces import JSONResponseMixin
+    
+    class MyJsonView(JSONResponseMixin, View):
+        json_indent = 4
+        
+        def get_context_data(self, **kwargs):
+            return {
+                'mylist': range(0, 42),
+                'mystring': "foobar",
+            }
+    
+        def get(self, request, *args, **kwargs):
+            context = self.get_context_data(**kwargs)
+            return self.render_to_response(context)
+
+JSONResponseView
+================
+
+TODO
 
 
 .. _Daniel Sokolowski: https://github.com/danols
