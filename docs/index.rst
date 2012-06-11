@@ -452,11 +452,6 @@ Additionally you have some class attributes to change some behaviours :
             context = self.get_context_data(**kwargs)
             return self.render_to_response(context)
 
-JSONResponseView
-================
-
-TODO
-
 
 .. _Daniel Sokolowski: https://github.com/danols
 .. _code here: https://github.com/lukaszb/django-guardian/issues/48
