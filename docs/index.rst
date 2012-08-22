@@ -6,13 +6,7 @@
 Welcome to django-braces's documentation!
 =========================================
 
-Contents:
-
-.. toctree::
-   :maxdepth: 2
-
-
-Here are the generic mixins we've been using a lot lately. If you have any that you find useful, feel free to send them to us in a pull request. Please include example usage.
+You can view the code of our project or fork it and add your own mixins (please, send them back to us), on `Github`_.
 
 LoginRequiredMixin
 ==================
@@ -263,6 +257,21 @@ A simple mixin which allows you to specify a list or tuple of foreign key fields
         select_related = ["user"]
         template_name = "profiles/detail.html"
 
+StaffuserRequiredMixin
+======================
+
+A mixin to support those cases where you want to give staff access to a view.
+
+::
+
+    # views.py
+    from django.views.generic import DetailView
+
+    from braces.views import StaffuserRequiredMixin
+
+    class SomeStaffuserView(LoginRequiredMixin, StaffuserRequiredMixin, TemplateView):
+        template_name = "path/to/template.html"
+
 
 SimpleListView
 ==============
@@ -504,3 +513,5 @@ Indices and tables
 * :ref:`modindex`
 * :ref:`search`
 
+
+.. _Github: https://github.com/brack3t/django-braces
