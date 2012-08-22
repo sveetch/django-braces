@@ -207,6 +207,134 @@ class SelectRelatedMixin(object):
         )
 
 
+class JSONMixin(object):
+    """
+    Simple Mixin to compile the context view as JSON
+    
+    This does not implement a direct response, you have to return it with the 
+    ``json_to_response`` method in your view.
+    """
+    mimetype = "application/json"
+    json_indent = None
+    json_encoder = None
+    
+    def encode_context(self, context):
+        json_kwargs = {}
+        if self.json_indent is not None:
+            json_kwargs['indent'] = self.json_indent
+        if self.json_encoder is not None:
+            json_kwargs['encoder'] = self.json_encoder
+        return json.dumps(context, **json_kwargs)
+    
+    def json_to_response(self, context, **response_kwargs):
+        """
+        Returns a response with a template rendered with the given context.
+        """
+        if 'mimetype' not in response_kwargs:
+            response_kwargs['mimetype'] = self.mimetype
+        return HttpResponse(self.encode_context(context), **response_kwargs)
+
+
+class JSONResponseMixin(JSONMixin):
+    """Mixin to directly return a JSON response"""
+    def render_to_response(self, context, **response_kwargs):
+        """
+        Returns a response with a template rendered with the given context.
+        """
+        return self.json_to_response(context)
+
+
+class DownloadMixin(object):
+    """
+    Simple Mixin to send a downloadable content
+    
+    Inherits must have :
+    
+    * Filled the ``self.mimetype`` attribute with the content mimetype to send;
+    * Implementation of ``get_filename()`` that return the filename to use in response 
+      headers;
+    * Implementation of ``get_content()`` that return the content to send as downloadable.
+    
+    If the content is a not a string, it is assumed to be a fileobject to send as 
+    the content with its ``read()`` method.
+    
+    Optionnaly implement a ``close_content()`` to close specifics objects linked to 
+    content fileobject, if it does not exists a try will be made on a close() method 
+    on the content fileobject;
+    
+    A "get_filename_timestamp" method is implemented to return a timestamp to use in your 
+    filename if needed, his date format is defined in "timestamp_format" attribute (in a 
+    suitable way to use with strftime on a datetime object).
+    """
+    mimetype = None
+    timestamp_format = "%Y-%m-%d"
+    
+    def get_filename_timestamp(self):
+        return datetime.datetime.now().strftime(self.timestamp_format)
+    
+    def get_filename(self, context):
+        raise ImproperlyConfigured("DownloadMixin requires an implementation of 'get_filename()' to return the filename to use in headers")
+    
+    def get_content(self, context):
+        raise ImproperlyConfigured("DownloadMixin requires an implementation of 'get_content()' to return the downloadable content")
+    
+    def render_to_response(self, context, **response_kwargs):
+        if getattr(self, 'mimetype', None) is None:
+            raise ImproperlyConfigured("DownloadMixin requires a definition of 'mimetype' attribute")
+        # Needed headers
+        response = HttpResponse(mimetype=self.mimetype, **response_kwargs)
+        response['Content-Disposition'] = 'attachment; filename={0}'.format(self.get_filename(context))
+        # Read the content file object or string, append it to response and close it
+        content = self.get_content(context)
+        if isinstance(content, basestring):
+            response.write(content)
+        else:
+            response.write(content.read())
+        # Conditionnal closing content object
+        if hasattr(self, 'close_content'):
+            self.close_content(context, content)
+        elif hasattr(content, 'close'):
+            content.close()
+            
+        return response
+
+    def get_context_data(self, **kwargs):
+        return {
+            'params': kwargs
+        }
+
+    def get(self, request, *args, **kwargs):
+        context = self.get_context_data(**kwargs)
+        return self.render_to_response(context)
+
+
+class ExtendTemplateVariableMixin(object):
+    """
+    Get the extend variable to use in the template
+    
+    Default behaviour is to switch on two templates depending on the request is an ajax 
+    request or not, if ajax "base_modal.html" is used else the default extend will 
+    simply be "base.html".
+    
+    This only put the "template_extend" variable in the template context, your template 
+    have to use it, this does not modify itself the response nor the template.
+    """
+    default_extend_template = "base.html"
+    modal_extend_template = "base_modal.html"
+    
+    def get_template_extend(self):
+        if self.request.is_ajax():
+            return self.modal_extend_template
+        return self.default_extend_template
+    
+    def get_context_data(self, **kwargs):
+        context = super(ExtendTemplateVariableMixin, self).get_context_data(**kwargs)
+        context.update({
+            'template_extend': self.get_template_extend(),
+        })
+        return context
+
+
 class SimpleListView(TemplateResponseMixin, BaseListView):
     """
     Like generic.ListView but use only ``get_template`` to find template and not an 
@@ -298,69 +426,51 @@ class ListAppendView(SimpleListView, FormMixin):
     def put(self, *args, **kwargs):
         return self.post(*args, **kwargs)
 
-
-class DownloadMixin(object):
+class DetailListAppendView(ListAppendView):
     """
-    Simple Mixin to send a downloadable content
+    A view to display a parent object details, list his "children" and display a form 
+    to append a new child
     
-    Inherits must have :
+    Have the same behaviours than "ListAppendView" but get the parent object before 
+    doing anything.
     
-    * Filled the ``self.mimetype`` attribute with the content mimetype to send;
-    * Implementation of ``get_filename()`` that return the filename to use in response 
-      headers;
-    * Implementation of ``get_content()`` that return the content to send as downloadable.
+    "model" and "form_class" attribute are for the children, "context_parent_object_name" 
+    is used to name the parent variable in the template context.
     
-    If the content is a not a string, it is assumed to be a fileobject to send as 
-    the content with its ``read()`` method.
+    "get_parent_object" must be defined to return the parent instance. "get_queryset" 
+    should be defined to make a queryset exclusively on the parent children.
     
-    Optionnaly implement a ``close_content()`` to close specifics objects linked to 
-    content fileobject, if it does not exists a try will be made on a close() method 
-    on the content fileobject;
-    
-    A "get_filename_timestamp" method is implemented to return a timestamp to use in your 
-    filename if needed, his date format is defined in "timestamp_format" attribute (in a 
-    suitable way to use with strftime on a datetime object).
+    The parent object is also given to the append form, under the name defined with the 
+    "context_parent_object_name" attribute. Your Form should be aware of this.
     """
-    mimetype = None
-    timestamp_format = "%Y-%m-%d"
+    context_parent_object_name = 'parent_object'
     
-    def get_filename_timestamp(self):
-        return datetime.datetime.now().strftime(self.timestamp_format)
-    
-    def get_filename(self, context):
-        raise ImproperlyConfigured("DownloadMixin requires an implementation of 'get_filename()' to return the filename to use in headers")
-    
-    def get_content(self, context):
-        raise ImproperlyConfigured("DownloadMixin requires an implementation of 'get_content()' to return the downloadable content")
-    
-    def render_to_response(self, context, **response_kwargs):
-        if getattr(self, 'mimetype', None) is None:
-            raise ImproperlyConfigured("DownloadMixin requires a definition of 'mimetype' attribute")
-        # Needed headers
-        response = HttpResponse(mimetype=self.mimetype, **response_kwargs)
-        response['Content-Disposition'] = 'attachment; filename={0}'.format(self.get_filename(context))
-        # Read the content file object or string, append it to response and close it
-        content = self.get_content(context)
-        if isinstance(content, basestring):
-            response.write(content)
-        else:
-            response.write(content.read())
-        # Conditionnal closing content object
-        if hasattr(self, 'close_content'):
-            self.close_content(context, content)
-        elif hasattr(content, 'close'):
-            content.close()
-            
-        return response
+    def get_parent_object(self):
+        raise ImproperlyConfigured(u"%(cls)s's 'get_parent_object' method must be defined " % {"cls": self.__class__.__name__})
 
     def get_context_data(self, **kwargs):
-        return {
-            'params': kwargs
-        }
-
+        kwargs.update({
+            self.context_parent_object_name: self.parent_object,
+        })
+        return super(DetailListAppendView, self).get_context_data(**kwargs)
+        
+    def get_form_kwargs(self):
+        """
+        Returns an instance of the form to be used in this view.
+        """
+        kwargs = super(DetailListAppendView, self).get_form_kwargs()
+        kwargs.update({
+            self.context_parent_object_name: self.parent_object,
+        })
+        return kwargs
+        
     def get(self, request, *args, **kwargs):
-        context = self.get_context_data(**kwargs)
-        return self.render_to_response(context)
+        self.parent_object = self.get_parent_object()
+        return super(DetailListAppendView, self).get(request, *args, **kwargs)
+        
+    def post(self, request, *args, **kwargs):
+        self.parent_object = self.get_parent_object()
+        return super(DetailListAppendView, self).post(request, *args, **kwargs)
 
 
 class ExcelExportView(DownloadMixin, View):
@@ -382,26 +492,3 @@ class ExcelExportView(DownloadMixin, View):
     
     def get_filename(self, context):
         return self.filename_format.format(**context)
-
-
-class JSONResponseMixin(object):
-    """Simple Mixin to return a JSON response"""
-    mimetype = "application/json"
-    json_indent = None
-    json_encoder = None
-    
-    def encode_context(self, context):
-        json_kwargs = {}
-        if self.json_indent is not None:
-            json_kwargs['indent'] = self.json_indent
-        if self.json_encoder is not None:
-            json_kwargs['encoder'] = self.json_encoder
-        return json.dumps(context, **json_kwargs)
-    
-    def render_to_response(self, context, **response_kwargs):
-        """
-        Returns a response with a template rendered with the given context.
-        """
-        if 'mimetype' not in response_kwargs:
-            response_kwargs['mimetype'] = self.mimetype
-        return HttpResponse(self.encode_context(context), **response_kwargs)

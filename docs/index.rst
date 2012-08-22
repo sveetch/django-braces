@@ -297,48 +297,6 @@ filled.
         model = Post
         success_url = '/guestbook/'
 
-
-ListAppendView
-==============
-
-A view to display an object list with a form to append a new object to the list. 
-
-An example usage is a message list in a guestbook where you would want to display a form 
-after the list to append a new message.
-
-This view re-use some code from FormMixin and SimpleListView, because sadly it seems 
-not possible to simply mix them.
-
-Need ``model`` and ``form_class`` class attributes for the form parts and the required 
-ones by ``BaseListView``. The ``get_success_url`` method should be filled too.
-
-The additional ``locked_form`` method class is used to disable form (like if your list 
-object is closed to new object), also you can implement the ``is_locked_form`` method if 
-needed.
-
-::
-    
-    # views.py
-    
-    from braces import ListAppendView
-    
-    from myguestbook.models import Post
-    from myguestbook.forms import PostCreateForm
-    
-    class ThreadView(ListAppendView):
-        """
-        Message list with a form to append a new message, after validated form the user 
-        is redirected on the list
-        """
-        model = Post
-        form_class = PostCreateForm
-        template_name = 'guestbook/message_list.html'
-        paginate_by = 42
-        context_object_name = 'object_list'
-        success_url = '/guestbook/'
-        queryset = Post.objects.all()
-
-
 DownloadMixin
 ==============
 
@@ -394,35 +352,12 @@ in a ``TemplateView`` the context kwargs are given to the method so you can prep
         def get_content(self, context):
             return open("myfile.pdf", "r")
 
-ExcelExportView
-===============
+JSONMixin
+=========
 
-A generic view to export an Excel file.
-
-Inherits must implement at least the ``get_content()`` method to return the content file 
-object. This is where you have to build your excel file object to send 
-(``ExcelExportView`` does not contain any specific methods to build an Excel file).
-
-::
+Simple Mixin to compile data as JSON
     
-    # views.py
-    from braces import ExcelExportView
-    
-    class ReportExcelView(ExcelExportView):
-        filename_format = "worksheet-{timestamp}.xls"
-        
-        def get_content(self, context, **response_kwargs):
-            # build your excel file here
-            content = ...
-            return content
-
-JSONResponseMixin
-=================
-
-This is a simple mixin to return a JSON response.
-
-It uses the context as the object to serialize in JSON, so your view should implement 
-the ``get_context_data`` method to return what you want to dump as JSON.
+This does not implement a direct response, you have to return it with the ``json_to_response`` method in your view.
 
 Additionally you have some class attributes to change some behaviours :
 
@@ -431,6 +366,16 @@ Additionally you have some class attributes to change some behaviours :
 * ``json_indent`` (an integer) to indent your JSON if needed;
 * ``json_encoder`` to give a special encoder to use to dump your JSON if you have some 
   objects (like a datetime) not supported by the ``json`` Python module.
+
+JSONResponseMixin
+=================
+
+Mixin to directly return a JSON response.
+
+This inherit from the `JSONMixin`_ behaviours and options.
+
+It uses the context as the object to serialize in JSON, so your view should implement 
+the ``get_context_data`` method to return what you want to dump as JSON.
 
 ::
     
@@ -452,6 +397,101 @@ Additionally you have some class attributes to change some behaviours :
             context = self.get_context_data(**kwargs)
             return self.render_to_response(context)
 
+DownloadMixin
+=============
+
+Simple Mixin to send a downloadable content
+
+Inherits must have :
+
+* Filled the ``mimetype`` class attribute with the content mimetype to send;
+* Implementation of ``get_filename()`` that return the filename to use in response headers;
+* Implementation of ``get_content()`` that return the content to send as downloadable.
+
+If the content is a not a string, it is assumed to be a fileobject to send as the content with its ``read()`` method.
+
+Optionnaly implement a ``close_content()`` to close specifics objects linked to content fileobject, if it does not exists a try will be made on a close() method on the content fileobject;
+
+A ``get_filename_timestamp`` method is implemented to return a timestamp to use in your filename if needed, his date format is defined in the ``timestamp_format`` class attribute (in a suitable way to use with strftime on a datetime object).
+
+ExtendTemplateVariableMixin
+===========================
+
+Get the extend variable to use in the template.
+
+Default behaviour is to switch on two templates depending on the request is an Ajax request or not. If it's Ajax the ``modal_extend_template`` class attribute is used else the default extend will be the content of ``default_extend_template``.
+
+This mixin only put a ``template_extend`` variable in the template context, your template have to use it, this does not modify itself the response nor the template.
+
+ListAppendView
+==============
+
+A view to display an object list with a form to append a new object to the list. 
+
+An example usage is a message list in a guestbook where you would want to display a form after the list to append a new message.
+
+This view re-use some code from FormMixin and SimpleListView, because it does not seems possible to simply mix them.
+
+Need the ``model`` and ``form_class`` class attributes for the form parts and the required ones by ``BaseListView``. The ``get_success_url`` method should be filled too.
+
+The additional ``locked_form`` method class is used to disable form (like if your list object is closed to new object), also you can implement the ``is_locked_form`` method if needed.
+
+::
+    
+    # views.py
+    
+    from braces import ListAppendView
+    
+    from myguestbook.models import Post
+    from myguestbook.forms import PostCreateForm
+    
+    class ThreadView(ListAppendView):
+        """
+        Message list with a form to append a new message, after validated form the user 
+        is redirected on the list
+        """
+        model = Post
+        form_class = PostCreateForm
+        template_name = 'guestbook/message_list.html'
+        paginate_by = 42
+        context_object_name = 'object_list'
+        success_url = '/guestbook/'
+        queryset = Post.objects.all()
+
+DetailListAppendView
+====================
+
+A view to display a parent object details, list his "children" and display a form to append a new child
+
+Have the same behaviours than `ListAppendView`_ but get the parent object before doing anything.
+
+``model`` and ``form_class`` class attributes are for the children, ``context_parent_object_name`` is used to name the parent variable in the template context.
+
+The ``get_parent_object`` method must be defined to return the parent instance and the ``get_queryset`` method should be defined to make a queryset exclusively on the parent children.
+
+The parent object is also given to the append form, under the name defined with the ``context_parent_object_name`` class attribute. Your Form should be aware of this.
+
+ExcelExportView
+===============
+
+A generic view to export an Excel file.
+
+Inherits must implement at least the ``get_content()`` method to return the content file 
+object. This is where you have to build your excel file object to send 
+(``ExcelExportView`` does not contain any specific methods to build an Excel file).
+
+::
+    
+    # views.py
+    from braces import ExcelExportView
+    
+    class ReportExcelView(ExcelExportView):
+        filename_format = "worksheet-{timestamp}.xls"
+        
+        def get_content(self, context, **response_kwargs):
+            # build your excel file here
+            content = ...
+            return content
 
 .. _Daniel Sokolowski: https://github.com/danols
 .. _code here: https://github.com/lukaszb/django-guardian/issues/48
