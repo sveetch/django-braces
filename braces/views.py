@@ -3,16 +3,19 @@ import datetime, json
 from django.conf import settings
 from django.contrib.auth import REDIRECT_FIELD_NAME
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import ImproperlyConfigured
+from django.contrib.auth.views import redirect_to_login
+from django.core import serializers
+from django.core.exceptions import ImproperlyConfigured, PermissionDenied
+from django.core.serializers.json import DjangoJSONEncoder
 from django.core.urlresolvers import reverse
-from django.http import HttpResponse, HttpResponseForbidden, HttpResponseRedirect, Http404
+from django.utils import simplejson as json
+from django.http import HttpResponse, HttpResponseRedirect, Http404
 from django.utils.decorators import method_decorator
 from django.utils.http import urlquote
 from django.views.generic import CreateView
 from django.views.generic.base import TemplateResponseMixin, View
 from django.views.generic.list import BaseListView
 from django.views.generic.edit import BaseDeleteView, FormMixin
-
 
 class CreateAndRedirectToEditView(CreateView):
     """
@@ -44,8 +47,9 @@ class LoginRequiredMixin(object):
     """
 
     @method_decorator(login_required)
-    def dispatch(self, *args, **kwargs):
-        return super(LoginRequiredMixin, self).dispatch(*args, **kwargs)
+    def dispatch(self, request, *args, **kwargs):
+        return super(LoginRequiredMixin, self).dispatch(request,
+            *args, **kwargs)
 
 
 class AnonymousRequiredMixin(object):
@@ -114,17 +118,123 @@ class PermissionRequiredMixin(object):
 
         if not has_permission:  # If the user lacks the permission
             if self.raise_exception:  # *and* if an exception was desired
-                return HttpResponseForbidden()  # return a forbidden response.
+                raise PermissionDenied  # return a forbidden response.
             else:
-                # otherwise, redirect the user to the login page.
-                # Also, handily, sets the `next` GET argument
-                # for future redirects.
-                path = urlquote(request.get_full_path())
-                tup = self.login_url, self.redirect_field_name, path
-                return HttpResponseRedirect("%s?%s=%s" % tup)
+                return redirect_to_login(request.get_full_path(),
+                                         self.login_url,
+                                         self.redirect_field_name)
 
         return super(PermissionRequiredMixin, self).dispatch(request,
             *args, **kwargs)
+
+
+class MultiplePermissionsRequiredMixin(object):
+    """
+    View mixin which allows you to specify two types of permission
+    requirements. The `permissions` attribute must be a dict which
+    specifies two keys, `all` and `any`. You can use either one on
+    it's own or combine them. Both keys values are required be a list or
+    tuple of permissions in the format of
+    <app label>.<permission codename>
+
+    By specifying the `all` key, the user must have all of
+    the permissions in the passed in list.
+
+    By specifying The `any` key , the user must have ONE of the set
+    permissions in the list.
+
+    Class Settings
+        `permissions` - This is required to be a dict with one or both
+            keys of `all` and/or `any` containing a list or tuple of
+            permissions in the format of <app label>.<permission codename>
+        `login_url` - the login url of site
+        `redirect_field_name` - defaults to "next"
+        `raise_exception` - defaults to False - raise 403 if set to True
+
+    Example Usage
+        class SomeView(MultiplePermissionsRequiredMixin, ListView):
+            ...
+            #required
+            permissions = {
+                "all": (blog.add_post, blog.change_post),
+                "any": (blog.delete_post, user.change_user)
+            }
+
+            #optional
+            login_url = "/signup/"
+            redirect_field_name = "hollaback"
+            raise_exception = True
+    """
+    login_url = settings.LOGIN_URL  # LOGIN_URL from project settings
+    permissions = None  # Default required perms to none
+    raise_exception = False  # Default whether to raise an exception to none
+    redirect_field_name = REDIRECT_FIELD_NAME  # Set by django.contrib.auth
+
+    def dispatch(self, request, *args, **kwargs):
+        self._check_permissions_attr()
+
+        perms_all = self.permissions.get('all') or None
+        perms_any = self.permissions.get('any') or None
+
+        self._check_permissions_keys_set(perms_all, perms_any)
+        self._check_perms_keys("all", perms_all)
+        self._check_perms_keys("any", perms_any)
+
+        # If perms_all, check that user has all permissions in the list/tuple
+        if perms_all:
+            if not request.user.has_perms(perms_all):
+                if self.raise_exception:
+                    raise PermissionDenied
+                return redirect_to_login(request.get_full_path(),
+                                         self.login_url,
+                                         self.redirect_field_name)
+
+        # If perms_any, check that user has at least one in the list/tuple
+        if perms_any:
+            has_one_perm = False
+            for perm in perms_any:
+                if request.user.has_perm(perm):
+                    has_one_perm = True
+                    break
+
+            if not has_one_perm:
+                if self.raise_exception:
+                    raise PermissionDenied
+                return redirect_to_login(request.get_full_path(),
+                                         self.login_url,
+                                         self.redirect_field_name)
+
+        return super(MultiplePermissionsRequiredMixin, self).dispatch(request,
+            *args, **kwargs)
+
+    def _check_permissions_attr(self):
+        """
+        Check permissions attribute is set and that it is a dict.
+        """
+        if self.permissions is None or not isinstance(self.permissions, dict):
+            raise ImproperlyConfigured("'PermissionsRequiredMixin' requires "
+                "'permissions' attribute to be set to a dict.")
+
+    def _check_permissions_keys_set(self, perms_all=None, perms_any=None):
+        """
+        Check to make sure the keys `any` or `all` are not both blank.
+        If both are blank either an empty dict came in or the wrong keys
+        came in. Both are invalid and should raise an exception.
+        """
+        if perms_all is None and perms_any is None:
+            raise ImproperlyConfigured("'PermissionsRequiredMixin' requires"
+                "'permissions' attribute to be set to a dict and the 'any' "
+                "or 'all' key to be set.")
+
+    def _check_perms_keys(self, key=None, perms=None):
+        """
+        If the permissions list/tuple passed in is set, check to make
+        sure that it is of the type list or tuple.
+        """
+        if perms and not isinstance(perms, (list, tuple)):
+            raise ImproperlyConfigured("'MultiplePermissionsRequiredMixin' "
+                "requires permissions dict '%s' value to be a list "
+                "or tuple." % key)
 
 
 class UserFormKwargsMixin(object):
@@ -133,8 +243,8 @@ class UserFormKwargsMixin(object):
     Note: Using this mixin requires you to pop the `user` kwarg
     out of the dict in the super of your form's `__init__`.
     """
-    def get_form_kwargs(self, **kwargs):
-        kwargs = super(UserFormKwargsMixin, self).get_form_kwargs(**kwargs)
+    def get_form_kwargs(self):
+        kwargs = super(UserFormKwargsMixin, self).get_form_kwargs()
         # Update the existing form kwargs dict with the request's user.
         kwargs.update({"user": self.request.user})
         return kwargs
@@ -167,14 +277,11 @@ class SuperuserRequiredMixin(object):
     def dispatch(self, request, *args, **kwargs):
         if not request.user.is_superuser:  # If the user is a standard user,
             if self.raise_exception:  # *and* if an exception was desired
-                return HttpResponseForbidden()  # return a forbidden response.
+                raise PermissionDenied  # return a forbidden response.
             else:
-                # otherwise, redirect the user to the login page.
-                # Also, handily, sets the `next` GET argument for
-                # future redirects.
-                path = urlquote(request.get_full_path())
-                tup = self.login_url, self.redirect_field_name, path
-                return HttpResponseRedirect("%s?%s=%s" % tup)
+                return redirect_to_login(request.get_full_path(),
+                                         self.login_url,
+                                         self.redirect_field_name)
 
         return super(SuperuserRequiredMixin, self).dispatch(request,
             *args, **kwargs)
@@ -197,8 +304,8 @@ class SetHeadlineMixin(object):
         if self.headline is None:  # If no headline was provided as a view
                                    # attribute and this method wasn't overriden
                                    # raise a configuration error.
-            raise ImproperlyConfigured(u"%(cls)s is missing a headline. Define "
-                u"%(cls)s.headline, or override "
+            raise ImproperlyConfigured(u"%(cls)s is missing a headline. "
+                u"Define %(cls)s.headline, or override "
                 u"%(cls)s.get_headline()." % {"cls": self.__class__.__name__
             })
         return self.headline
@@ -214,8 +321,8 @@ class SelectRelatedMixin(object):
     def get_queryset(self):
         if self.select_related is None:  # If no fields were provided,
                                          # raise a configuration error
-            raise ImproperlyConfigured(u"%(cls)s is missing the select_related "
-                "property. This must be a tuple or list." % {
+            raise ImproperlyConfigured(u"%(cls)s is missing the "
+                "select_related property. This must be a tuple or list." % {
                     "cls": self.__class__.__name__})
 
         if not isinstance(self.select_related, (tuple, list)):
@@ -227,10 +334,7 @@ class SelectRelatedMixin(object):
         # Get the current queryset of the view
         queryset = super(SelectRelatedMixin, self).get_queryset()
 
-        # Return the queryset with a comma-joined argument to `select_related`.
-        return queryset.select_related(
-            ", ".join(self.select_related)
-        )
+        return queryset.select_related(*self.select_related)
 
 
 class StaffuserRequiredMixin(object):
@@ -244,54 +348,14 @@ class StaffuserRequiredMixin(object):
     def dispatch(self, request, *args, **kwargs):
         if not request.user.is_staff:  # If the request's user is not staff,
             if self.raise_exception:  # *and* if an exception was desired
-                return HttpResponseForbidden()  # return a forbidden response
+                raise PermissionDenied  # return a forbidden response
             else:
-                # otherwise, redirect the user to the login page.
-                # Also, handily, sets the GET `next` argument for
-                # future redirects.
-                path = urlquote(request.get_full_path())
-                tup = self.login_url, self.redirect_field_name, path
-                return HttpResponseRedirect("%s?%s=%s" % tup)
+                return redirect_to_login(request.get_full_path(),
+                                         self.login_url,
+                                         self.redirect_field_name)
 
         return super(StaffuserRequiredMixin, self).dispatch(request,
             *args, **kwargs)
-
-
-class JSONMixin(object):
-    """
-    Simple Mixin to compile the context view as JSON
-    
-    This does not implement a direct response, you have to return it with the 
-    ``json_to_response`` method in your view.
-    """
-    mimetype = "application/json"
-    json_indent = None
-    json_encoder = None
-    
-    def encode_context(self, context):
-        json_kwargs = {}
-        if self.json_indent is not None:
-            json_kwargs['indent'] = self.json_indent
-        if self.json_encoder is not None:
-            json_kwargs['encoder'] = self.json_encoder
-        return json.dumps(context, **json_kwargs)
-    
-    def json_to_response(self, context, **response_kwargs):
-        """
-        Returns a response with a template rendered with the given context.
-        """
-        if 'mimetype' not in response_kwargs:
-            response_kwargs['mimetype'] = self.mimetype
-        return HttpResponse(self.encode_context(context), **response_kwargs)
-
-
-class JSONResponseMixin(JSONMixin):
-    """Mixin to directly return a JSON response"""
-    def render_to_response(self, context, **response_kwargs):
-        """
-        Returns a response with a template rendered with the given context.
-        """
-        return self.json_to_response(context)
 
 
 class DownloadMixin(object):
@@ -300,7 +364,7 @@ class DownloadMixin(object):
     
     Inherits must have :
     
-    * Filled the ``self.mimetype`` attribute with the content mimetype to send;
+    * Filled the ``self.content_type`` attribute with the content content_type to send;
     * Implementation of ``get_filename()`` that return the filename to use in response 
       headers;
     * Implementation of ``get_content()`` that return the content to send as downloadable.
@@ -316,7 +380,7 @@ class DownloadMixin(object):
     filename if needed, his date format is defined in "timestamp_format" attribute (in a 
     suitable way to use with strftime on a datetime object).
     """
-    mimetype = None
+    content_type = None
     timestamp_format = "%Y-%m-%d"
     
     def get_filename_timestamp(self):
@@ -329,10 +393,10 @@ class DownloadMixin(object):
         raise ImproperlyConfigured("DownloadMixin requires an implementation of 'get_content()' to return the downloadable content")
     
     def render_to_response(self, context, **response_kwargs):
-        if getattr(self, 'mimetype', None) is None:
-            raise ImproperlyConfigured("DownloadMixin requires a definition of 'mimetype' attribute")
+        if getattr(self, 'content_type', None) is None:
+            raise ImproperlyConfigured("DownloadMixin requires a definition of 'content_type' attribute")
         # Needed headers
-        response = HttpResponse(mimetype=self.mimetype, **response_kwargs)
+        response = HttpResponse(content_type=self.content_type, **response_kwargs)
         response['Content-Disposition'] = 'attachment; filename={0}'.format(self.get_filename(context))
         # Read the content file object or string, append it to response and close it
         content = self.get_content(context)
@@ -530,7 +594,7 @@ class ExcelExportView(DownloadMixin, View):
     Inherits must implement at least the ``get_content()`` method to return the content 
     fileobject
     """
-    mimetype = 'application/ms-excel'
+    content_type = 'application/ms-excel'
     filename_format = "file_{timestamp}.xls"
     
     def get_context_data(self, **kwargs):
@@ -542,3 +606,105 @@ class ExcelExportView(DownloadMixin, View):
     
     def get_filename(self, context):
         return self.filename_format.format(**context)
+
+class JSONResponseMixin(object):
+    """
+    A mixin that allows you to easily serialize simple data such as a dict or
+    Django models.
+    """
+    content_type = "application/json"
+
+    def get_content_type(self):
+        if self.content_type is None:
+            raise ImproperlyConfigured(u"%(cls)s is missing a content type. "
+                u"Define %(cls)s.content_type, or override "
+                u"%(cls)s.get_content_type()." % {
+                "cls": self.__class__.__name__
+            })
+        return self.content_type
+
+    def render_json_response(self, context_dict):
+        """
+        Limited serialization for shipping plain data. Do not use for models
+        or other complex or custom objects.
+        """
+        json_context = json.dumps(context_dict, cls=DjangoJSONEncoder, ensure_ascii=False)
+        return HttpResponse(json_context, content_type=self.get_content_type())
+
+    def render_json_object_response(self, objects, **kwargs):
+        """
+        Serializes objects using Django's builtin JSON serializer. Additional
+        kwargs can be used the same way for django.core.serializers.serialize.
+        """
+        json_data = serializers.serialize("json", objects, **kwargs)
+        return HttpResponse(json_data, content_type=self.get_content_type())
+
+class JSONResponseExtendedMixin(JSONResponseMixin):
+    """
+    Simple Mixin to compile the context view as JSON
+    
+    This does not implement a direct response, you have to return it with the 
+    ``json_to_response`` method in your view.
+    """
+    json_indent = None
+    json_encoder = DjangoJSONEncoder
+    json_ensure_ascii = False
+    
+    def encode_context(self, context):
+        json_kwargs = {}
+        if self.json_indent is not None:
+            json_kwargs['indent'] = self.json_indent
+        if self.json_encoder is not None:
+            json_kwargs['encoder'] = self.json_encoder
+        if self.json_ensure_ascii is not None:
+            json_kwargs['ensure_ascii'] = self.json_ensure_ascii
+        return json.dumps(context, **json_kwargs)
+
+    def render_json_response(self, context_dict, **response_kwargs):
+        """
+        Limited serialization for shipping plain data. Do not use for models
+        or other complex or custom objects.
+        """
+        if 'content_type' not in response_kwargs:
+            response_kwargs['content_type'] = self.get_content_type()
+        return HttpResponse(self.encode_context(context), **response_kwargs)
+
+
+class JSONResponseViewMixin(JSONResponseExtendedMixin):
+    """Mixin to directly return a JSON response"""
+    def render_to_response(self, context, **response_kwargs):
+        """
+        Returns a response with a template rendered with the given context.
+        """
+        return self.json_to_response(context)
+
+class AjaxResponseMixin(object):
+    """
+    Mixin allows you to define alternative methods for ajax requests. Similar
+    to the normal get, post, and put methods, you can use get_ajax, post_ajax,
+    and put_ajax.
+    """
+    def dispatch(self, request, *args, **kwargs):
+        request_method = request.method.lower()
+
+        if request.is_ajax() and request_method in self.http_method_names:
+            handler = getattr(self, '%s_ajax' % request_method,
+                self.http_method_not_allowed)
+            self.request = request
+            self.args = args
+            self.kwargs = kwargs
+            return handler(request, *args, **kwargs)
+
+        return super(AjaxResponseMixin, self).dispatch(request, *args, **kwargs)
+
+    def get_ajax(self, request, *args, **kwargs):
+        return self.get(request, *args, **kwargs)
+
+    def post_ajax(self, request, *args, **kwargs):
+        return self.post(request, *args, **kwargs)
+
+    def put_ajax(self, request, *args, **kwargs):
+        return self.get(request, *args, **kwargs)
+
+    def delete_ajax(self, request, *args, **kwargs):
+        return self.get(request, *args, **kwargs)

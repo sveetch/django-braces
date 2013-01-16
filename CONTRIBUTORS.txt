@@ -12,6 +12,8 @@ Project Leads
 * ===================
 *
 * * Daniel Greenfeld
+* * Drew Tempelmeyer
+* * Baptiste Mispelon
 *
 * Other Contributors
 * ==================
